@@ -1,0 +1,639 @@
+"""
+Universal LLM Prompt Generator Node for ComfyUI (Modern V4 - Dual Model, Synchronous)
+======================================================================================
+Dual model architecture: Vision + Text models
+- Separate status outputs for clean prompt generation
+- Synchronous (ComfyUI-compatible)
+"""
+
+import json
+import requests
+import base64
+import io as python_io
+from PIL import Image
+import torch
+from torchvision.transforms import ToPILImage
+import os
+from typing import Optional, Tuple
+
+from comfy.comfy_types import ComfyNodeABC, IO, InputTypeDict
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# LOAD PRESETS FROM JSON
+# ═══════════════════════════════════════════════════════════════════════════
+def load_presets():
+    """Load system prompt presets from presets.json"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    presets_path = os.path.join(script_dir, "presets.json")
+
+    if not os.path.exists(presets_path):
+        presets_path = r"C:\scripts\presets.json"
+
+    try:
+        with open(presets_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            presets = data.get("presets", {})
+            print(f"[UniversalLLM V4] Loaded {len(presets)} presets from {presets_path}")
+            return presets
+    except Exception as e:
+        print(f"[UniversalLLM V4] Error loading presets: {e}")
+        return {"Empty (use your own)": ""}
+
+
+SYSTEM_PROMPTS = load_presets()
+
+# ═══════════════════════════════════════════════════════════════════════════
+# IMAGE PROCESSING
+# ═══════════════════════════════════════════════════════════════════════════
+def resize_image_smart(pil_image: Image.Image, target_width: int = 1024, target_height: int = 1024) -> Image.Image:
+    """Resize image to exact target dimensions"""
+    width, height = pil_image.size
+
+    if width == target_width and height == target_height:
+        print(f"[UniversalLLM V4] Image already at target size: {width}x{height}")
+        return pil_image
+
+    print(f"[UniversalLLM V4] Resizing image: {width}x{height} \u2192 {target_width}x{target_height}")
+    return pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+
+def tensor_to_pil(image_tensor) -> Image.Image:
+    """Convert ComfyUI image tensor to PIL Image"""
+    if isinstance(image_tensor, torch.Tensor):
+        if image_tensor.dim() == 4:
+            image_tensor = image_tensor.squeeze(0)
+        if image_tensor.dim() != 3:
+            raise ValueError(f"Expected 3D tensor, got {image_tensor.dim()}D")
+
+        if image_tensor.shape[-1] in [1, 3, 4]:
+            image_tensor = image_tensor.permute(2, 0, 1)
+
+        pil_image = ToPILImage()(image_tensor)
+        return pil_image
+    elif isinstance(image_tensor, Image.Image):
+        return image_tensor
+    else:
+        raise ValueError(f"Unsupported image type: {type(image_tensor)}")
+
+
+def pil_to_base64(pil_image: Image.Image, image_format: str = "JPEG", image_quality: int = 85) -> str:
+    """Convert PIL Image to base64 string with compression"""
+    buffered = python_io.BytesIO()
+    pil_image.save(buffered, format=image_format, quality=image_quality, optimize=True)
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SYNCHRONOUS API COMMUNICATION
+# ══════════════════════════════════════════════════════════════════════════
+def is_local_url(url: str) -> bool:
+    """Check if URL is localhost"""
+    return "localhost" in url.lower() or "127.0.0.1" in url
+
+
+def _get_mime_type(image_format: str) -> str:
+    """Get MIME type from image format"""
+    mime_map = {
+        "JPEG": "image/jpeg",
+        "PNG": "image/png",
+        "WEBP": "image/webp"
+    }
+    return mime_map.get(image_format.upper(), "image/jpeg")
+
+
+def _build_endpoint(url: str) -> str:
+    """Build API endpoint avoiding double /v1/"""
+    url = url.rstrip("/")
+    if url.endswith('/v1') or url.endswith('/v1/'):
+        # URL already has /v1, just add /chat/completions
+        return f"{url}/chat/completions"
+    elif is_local_url(url):
+        # Local URL without /v1, add full path
+        return f"{url}/v1/chat/completions"
+    else:
+        # Cloud API, just add /chat/completions
+        return f"{url}/chat/completions"
+
+
+def call_llm_api(
+    url: str,
+    api_key: str,
+    model: str,
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+    system_format: str = "строка",
+    image_base64: Optional[str] = None,
+    image_format: str = "JPEG"
+) -> Tuple[Optional[str], Optional[str]]:
+    """Universal synchronous LLM API caller"""
+    headers = {"Content-Type": "application/json"}
+
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Determine MIME type from format
+    mime_type = _get_mime_type(image_format)
+
+    # Format messages based on whether image is present
+    # If system_format == "в user" — merge system into first user message
+    merged_system_into_user = False
+    formatted_messages = []
+    for msg in messages:
+        if msg["role"] == "system":
+            if system_format == "в user":
+                continue  # Will be prepended to first user message
+            elif system_format == "строка":
+                formatted_messages.append({
+                    "role": "system",
+                    "content": msg["content"]
+                })
+            else:
+                formatted_messages.append({
+                    "role": "system",
+                    "content": [{"type": "text", "text": msg["content"]}]
+                })
+        elif msg["role"] == "user":
+            if system_format == "в user" and not merged_system_into_user:
+                # Prepend system content to first user message
+                merged_content = ""
+                for prev_msg in messages:
+                    if prev_msg["role"] == "system":
+                        merged_content = prev_msg["content"].strip() + "\n\n"
+                        break
+                merged_content += msg["content"]
+                merged_system_into_user = True
+                if image_base64:
+                    formatted_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": merged_content},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}}
+                        ]
+                    })
+                else:
+                    formatted_messages.append({
+                        "role": "user",
+                        "content": merged_content
+                    })
+            else:
+                if image_base64:
+                    formatted_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": msg["content"]},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}}
+                        ]
+                    })
+                else:
+                    formatted_messages.append({
+                        "role": "user",
+                        "content": msg["content"]
+                    })
+
+    body = {
+        "model": model,
+        "messages": formatted_messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+
+    # Smart endpoint construction - avoid double /v1/
+    endpoint = _build_endpoint(url)
+
+    print(f"[UniversalLLM V4] Calling API: {endpoint}")
+    print(f"[UniversalLLM V4] Model: {model}, Temperature: {temperature}, Max tokens: {max_tokens}")
+
+    try:
+        # Use longer timeout for image processing requests
+        timeout_seconds = 180 if image_base64 else 120
+        response = requests.post(endpoint, headers=headers, json=body, timeout=timeout_seconds)
+
+        if response.status_code != 200:
+            error_msg = f"API Error {response.status_code}"
+            try:
+                error_json = response.json()
+                error_msg += f": {error_json.get('error', {}).get('message', 'Unknown error')}"
+            except:
+                error_msg += f": {response.text[:200]}"
+            return None, error_msg
+
+        # Check if response is streaming (text/event-stream)
+        content_type = response.headers.get('Content-Type', '')
+
+        if 'text/event-stream' in content_type or 'stream' in content_type:
+            # Handle streaming response
+            print("[UniversalLLM V4] Detected streaming response, collecting chunks...")
+            full_content = ""
+            for line_text in response.text.split('\n'):
+                line_text = line_text.strip()
+                if line_text.startswith('data: '):
+                    data_str = line_text[6:]  # Remove 'data: ' prefix
+                    if data_str == '[DONE]':
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if "choices" in chunk and len(chunk["choices"]) > 0:
+                            delta = chunk["choices"][0].get("delta", {})
+                            content_chunk = delta.get("content", "")
+                            if content_chunk:
+                                full_content += content_chunk
+                    except:
+                        continue
+
+            if full_content:
+                print(f"[UniversalLLM V4] ✓ Success! Collected {len(full_content)} characters from stream")
+                return full_content, None
+            else:
+                return None, "Empty streaming response"
+        else:
+            # Handle regular JSON response
+            response_json = response.json()
+
+            if "choices" in response_json and len(response_json["choices"]) > 0:
+                content = response_json["choices"][0].get("message", {}).get("content", "")
+
+                usage = response_json.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = prompt_tokens + completion_tokens
+
+                print(f"[UniversalLLM V4] ✓ Success! Tokens: {prompt_tokens} + {completion_tokens} = {total_tokens}")
+
+                return content, None
+            else:
+                return None, "No response content from model"
+
+    except requests.exceptions.Timeout:
+        return None, f"Request timeout ({timeout_seconds}s)"
+    except requests.exceptions.ConnectionError as e:
+        return None, f"Connection error: {str(e)}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Network error: {str(e)}"
+    except Exception as e:
+        return None, f"Unexpected error: {str(e)}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMFYUI NODE (Modern V4 - Dual Model, Synchronous)
+# ══════════════════════════════════════════════════════════════════════════
+class UniversalLLMPromptNodeV4(ComfyNodeABC):
+    """Universal LLM Prompt Generator for ComfyUI (Dual Model Synchronous Version)"""
+
+    DESCRIPTION = "LLM prompt generator: Dual Mode (Vision \u2192 Text) or Single Mode (Multimodal Text)"
+    CATEGORY = "LLM"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> InputTypeDict:
+        preset_keys = list(SYSTEM_PROMPTS.keys())
+        default_preset = preset_keys[0] if preset_keys else "Empty (use your own)"
+
+        return {
+            "required": {
+                # Mode selection
+                "mode": ([
+                    "Dual Mode (Vision + Text)",
+                    "Single Mode (Multimodal Text)"
+                ], {
+                    "default": "Dual Mode (Vision + Text)",
+                }),
+
+                # Main prompt input
+                "prompt": (IO.STRING, {
+                    "multiline": True,
+                    "default": "a woman in a red dress standing on a rain-soaked rooftop at night",
+                }),
+
+                # System prompt configuration
+                "system_prompt_preset": (preset_keys, {
+                    "default": default_preset,
+                }),
+                "system_prompt_custom": (IO.STRING, {
+                    "multiline": True,
+                    "default": "",
+                }),
+
+                # System message format
+                "system_format": (["строка", "массив", "в user"], {
+                    "default": "в user",
+                }),
+
+                # Vision Model Settings
+                "vision_url": (IO.STRING, {
+                    "default": "http://127.0.0.1:8080",
+                }),
+                "vision_api_key": (IO.STRING, {
+                    "default": "",
+                }),
+                "vision_model": (IO.STRING, {
+                    "default": "qwen2-vl:7b",
+                }),
+                "vision_temperature": (IO.FLOAT, {
+                    "default": 0.7,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.01,
+                }),
+                "vision_max_tokens": (IO.INT, {
+                    "default": 1000,
+                    "min": 1,
+                    "max": 32000,
+                    "step": 1,
+                }),
+                "vision_enable": (IO.BOOLEAN, {
+                    "default": True,
+                }),
+
+                # Text Model Settings
+                "text_url": (IO.STRING, {
+                    "default": "http://127.0.0.1:8080",
+                }),
+                "text_api_key": (IO.STRING, {
+                    "default": "",
+                }),
+                "text_model": (IO.STRING, {
+                    "default": "qwen2:7b",
+                }),
+                "text_temperature": (IO.FLOAT, {
+                    "default": 0.7,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.01,
+                }),
+                "text_max_tokens": (IO.INT, {
+                    "default": 1500,
+                    "min": 1,
+                    "max": 32000,
+                    "step": 1,
+                }),
+                "text_enable": (IO.BOOLEAN, {
+                    "default": True,
+                }),
+
+                # Image Processing
+                "image_resize": (IO.BOOLEAN, {
+                    "default": True,
+                }),
+                "resize_width": (IO.INT, {
+                    "default": 1024,
+                    "min": 256,
+                    "max": 2048,
+                    "step": 64,
+                }),
+                "resize_height": (IO.INT, {
+                    "default": 1024,
+                    "min": 256,
+                    "max": 2048,
+                    "step": 64,
+                }),
+                "image_format": (["JPEG", "PNG", "WEBP"], {
+                    "default": "JPEG",
+                }),
+                "image_quality": (IO.INT, {
+                    "default": 85,
+                    "min": 10,
+                    "max": 100,
+                    "step": 5,
+                }),
+            },
+            "optional": {
+                "image": (IO.IMAGE,),
+                "vision_prompt": (IO.STRING, {
+                    "multiline": True,
+                    "default": "",
+                }),
+            }
+        }
+
+    RETURN_TYPES = (IO.STRING, IO.STRING, IO.STRING)
+    RETURN_NAMES = ("generated_prompt", "vision_status", "text_status")
+    FUNCTION = "execute"
+
+    def execute(
+        self,
+        mode: str,
+        prompt: str,
+        system_prompt_preset: str,
+        system_prompt_custom: str,
+        system_format: str,
+        vision_url: str,
+        vision_api_key: str,
+        vision_model: str,
+        vision_temperature: float,
+        vision_max_tokens: int,
+        vision_enable: bool,
+        text_url: str,
+        text_api_key: str,
+        text_model: str,
+        text_temperature: float,
+        text_max_tokens: int,
+        text_enable: bool,
+        image_resize: bool,
+        resize_width: int,
+        resize_height: int,
+        image_format: str,
+        image_quality: int,
+        image: Optional[torch.Tensor] = None,
+        vision_prompt: str = ""
+    ) -> Tuple[str, str, str]:
+        """Execute LLM prompt generation (synchronous)"""
+
+        is_single_mode = (mode == "Single Mode (Multimodal Text)")
+        mode_label = "Single Mode" if is_single_mode else "Dual Mode"
+        print(f"[UniversalLLM V4] Mode: {mode_label}")
+
+        # Initialize status outputs
+        vision_status = "Vision model: Not executed"
+        text_status = "Text model: Not executed"
+
+        # Validation
+        if not prompt or not prompt.strip():
+            return "Error: Prompt is required", vision_status, text_status
+
+        # Determine system prompt
+        if system_prompt_preset.startswith("Empty"):
+            system_prompt = system_prompt_custom
+        else:
+            system_prompt = SYSTEM_PROMPTS.get(system_prompt_preset, "")
+
+        # Process image if provided
+        image_base64 = None
+        if image is not None:
+            try:
+                print("[UniversalLLM V4] Processing image input...")
+                pil_image = tensor_to_pil(image)
+
+                if image_resize:
+                    pil_image = resize_image_smart(pil_image, resize_width, resize_height)
+
+                image_base64 = pil_to_base64(pil_image, image_format, image_quality)
+                print(f"[UniversalLLM V4] Image ready: {pil_image.size[0]}x{pil_image.size[1]}")
+            except Exception as e:
+                error_msg = f"Error processing image: {str(e)}"
+                final_prompt = f"Error processing image: {str(e)}"
+                vision_status = f"Vision model: {error_msg}"
+                text_status = f"Text model: {error_msg}"
+                return error_msg, vision_status, text_status
+        else:
+            print("[UniversalLLM V4] Running in text-only mode (no image provided)")
+
+        # ─── SINGLE MODE: One multimodal model ────────────────────────────────
+        if is_single_mode:
+            # Skip Vision model entirely
+            if image is not None:
+                vision_status = "Vision model: Disabled (Single Mode — image goes to Text model)"
+            else:
+                vision_status = "Vision model: Disabled (Single Mode — no image)"
+            print(f"[UniversalLLM V4] {vision_status}")
+
+            # Run Text model (with image if available)
+            if text_enable:
+                print("[UniversalLLM V4] Running Text model in Single Mode...")
+                text_status = "Text model: Processing..."
+
+                text_messages = []
+                if system_prompt and system_prompt.strip():
+                    text_messages.append({"role": "system", "content": system_prompt})
+                text_messages.append({"role": "user", "content": prompt})
+
+                text_result, text_error = call_llm_api(
+                    url=text_url,
+                    api_key=text_api_key,
+                    model=text_model,
+                    messages=text_messages,
+                    temperature=text_temperature,
+                    max_tokens=text_max_tokens,
+                    system_format=system_format,
+                    image_base64=image_base64,
+                    image_format=image_format
+                )
+
+                if text_error:
+                    text_status = f"Text model: Error - {text_error}"
+                    print(f"[UniversalLLM V4] Text model error: {text_error}")
+                    final_prompt = prompt
+                elif text_result and text_result.strip():
+                    final_prompt = text_result.strip()
+                    text_status = f"Text model: Success ({len(final_prompt)} chars)\n\nСгенерированный промпт:\n{final_prompt}"
+                    print(f"[UniversalLLM V4] Text model success: {len(final_prompt)} chars")
+                else:
+                    text_status = "Text model: Empty response"
+                    print("[UniversalLLM V4] Text model returned empty response")
+                    final_prompt = prompt
+            else:
+                text_status = "Text model: Disabled"
+                print("[UniversalLLM V4] Text model disabled")
+                final_prompt = prompt
+
+            print(f"[UniversalLLM V4] Final prompt length: {len(final_prompt)} characters")
+            return final_prompt, vision_status, text_status
+
+        # ─── DUAL MODE: Vision → Text ────────────────────────────────────────
+        # STAGE 1: Vision Model Processing (if image present and enabled)
+        vision_description = ""
+        if image is not None and vision_enable:
+            print("[UniversalLLM V4] Stage 1: Running vision model...")
+            vision_status = "Vision model: Processing..."
+
+            prompt_to_use = vision_prompt if vision_prompt.strip() else "Describe this image concisely in 2-3 sentences."
+            vision_messages = [{"role": "user", "content": prompt_to_use}]
+
+            vision_result, vision_error = call_llm_api(
+                url=vision_url,
+                api_key=vision_api_key,
+                model=vision_model,
+                messages=vision_messages,
+                temperature=vision_temperature,
+                max_tokens=vision_max_tokens,
+                system_format=system_format,
+                image_base64=image_base64,
+                image_format=image_format
+            )
+
+            if vision_error:
+                vision_status = f"Vision model: Error - {vision_error}"
+                print(f"[UniversalLLM V4] Vision model error: {vision_error}")
+                vision_description = ""
+            elif vision_result and vision_result.strip():
+                vision_description = vision_result.strip()
+                vision_status = f"Vision model: Success ({len(vision_description)} chars)\n\nОтвет модели:\n{vision_description}"
+                print(f"[UniversalLLM V4] Vision model success: {len(vision_description)} chars")
+            else:
+                vision_status = "Vision model: Empty response"
+                print("[UniversalLLM V4] Vision model returned empty response")
+                vision_description = ""
+        elif image is None and vision_enable:
+            vision_status = "Vision model: Skipped (no image provided)"
+            print("[UniversalLLM V4] Vision model skipped: no image")
+        else:
+            vision_status = "Vision model: Disabled"
+            print("[UniversalLLM V4] Vision model disabled")
+
+        # STAGE 2: Text Model Processing (if enabled)
+        if text_enable:
+            print("[UniversalLLM V4] Stage 2: Running text model...")
+            text_status = "Text model: Processing..."
+
+            # Enhance prompt with vision description if available
+            if vision_description and vision_description.strip():
+                enhanced_prompt = f"""Based on the image analysis: {vision_description}
+
+Original prompt: {prompt}
+
+Please enhance and refine the original prompt based on the image analysis above. Provide a detailed, vivid prompt suitable for image generation."""
+            else:
+                enhanced_prompt = prompt
+
+            text_messages = []
+            if system_prompt and system_prompt.strip():
+                text_messages.append({"role": "system", "content": system_prompt})
+
+            text_messages.append({"role": "user", "content": enhanced_prompt})
+
+            text_result, text_error = call_llm_api(
+                url=text_url,
+                api_key=text_api_key,
+                model=text_model,
+                messages=text_messages,
+                temperature=text_temperature,
+                max_tokens=text_max_tokens,
+                system_format=system_format,
+                image_base64=None,
+                image_format="JPEG"
+            )
+
+            if text_error:
+                text_status = f"Text model: Error - {text_error}"
+                print(f"[UniversalLLM V4] Text model error: {text_error}")
+                final_prompt = prompt
+            elif text_result and text_result.strip():
+                final_prompt = text_result.strip()
+                text_status = f"Text model: Success ({len(final_prompt)} chars)\n\nСгенерированный промпт:\n{final_prompt}"
+                print(f"[UniversalLLM V4] Text model success: {len(final_prompt)} chars")
+            else:
+                text_status = "Text model: Empty response"
+                print("[UniversalLLM V4] Text model returned empty response")
+                final_prompt = prompt
+        else:
+            text_status = "Text model: Disabled"
+            print("[UniversalLLM V4] Text model disabled")
+            final_prompt = prompt
+
+        print(f"[UniversalLLM V4] Final prompt length: {len(final_prompt)} characters")
+        return final_prompt, vision_status, text_status
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMFYUI REGISTRATION
+# ══════════════════════════════════════════════════════════════════════════
+NODE_CLASS_MAPPINGS = {
+    "UniversalLLMPromptNodeV4": UniversalLLMPromptNodeV4
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "UniversalLLMPromptNodeV4": "Universal LLM Prompt V4"
+}
+
+print("[UniversalLLM V4] Node registered successfully!")
