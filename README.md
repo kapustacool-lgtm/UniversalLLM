@@ -1,152 +1,83 @@
 # Universal LLM Prompt Node for ComfyUI
 
-Универсальная нода для генерации промптов через LLM API с поддержкой различных форматов и провайдеров.
+Connect any OpenAI-compatible LLM (local or cloud) to generate, enhance, and refine prompts — or perform image analysis, Q&A, and any LLM task — directly inside ComfyUI.
 
-## Версии
+## Features
 
-### V3 - Smart Format ⭐ (RECOMMENDED)
-**Новая версия с умным определением формата!**
+### Dual Model Architecture (Vision → Text)
+1. **Vision model** analyzes an image (e.g., "Describe this scene")
+2. **Text model** uses that analysis + your prompt to generate the final result
 
-- ✅ **Smart format detection** - автоматически выбирает формат (string vs multimodal)
-- ✅ **Force multimodal** - опция для принудительного использования мультимодального формата
-- ✅ **Оптимизированная обработка** - system messages не оборачиваются в массив без необходимости
-- ✅ **Поддержка LongCat API** - правильная обработка `/openai` endpoint
-- ✅ **Async/Await** - неблокирующие API вызовы
-- ✅ **Улучшенная обработка ошибок**
+### Single Mode (Multimodal)
+One multimodal model handles both image and text in a single pass — ideal for vision-capable models like `qwen2-vl`, `llava`, `gpt-4-vision`.
 
-### V2 - Async (Deprecated)
-Асинхронная версия с мультимодальным форматом для всех запросов.
+### Smart Format Detection (V3)
+Automatically selects the correct message format:
+- **String** — for most models (GPT, Claude, Mistral, Llama...)
+- **Multimodal array** — for vision models and APIs like LongCat Omni
 
-**Проблема:** Всегда использует мультимодальный формат, даже когда модель его не требует.
+### Universal API Support
+Any OpenAI-compatible endpoint:
+- **Local:** Ollama, llama.cpp, LocalAI, text-generation-webui
+- **Cloud:** OpenAI, Anthropic Claude, LongCat, OpenRouter, Groq, DeepSeek, Together AI
 
-### V1 - Original (Legacy)
-Базовая версия с синхронными запросами.
+### System Prompt Presets
+Built-in presets for popular workflows:
+- **LTX Video 2.3 I2V** — Russian-to-English motion description converter for video generation
+- **Flux Klein 9B** — overspecified prompts compensating for model weaknesses
+- **Flux Photo / SDXL** — natural language and booru-style prompt generators
+- Add your own via `presets.json`
 
----
+## Nodes Included
 
-## Когда использовать какой формат
+| Node | Description |
+|------|-------------|
+| **ComfyUI Dual VLLM (V5)** | Latest — Dual/Single Mode, synchronous, clean status outputs |
+| **Universal LLM Prompt V4** | Same dual architecture, slightly older interface |
+| **Universal LLM Prompt V3** | Smart format detection, async support ⭐ RECOMMENDED |
+| **Universal LLM Prompt V2** | Async (deprecated) |
+| **Universal LLM Prompt V1** | Original sync version (legacy) |
 
-### String Format (по умолчанию в V3)
-Используется для большинства моделей:
-```json
-{
-  "role": "user",
-  "content": "Your text here"
-}
-```
+## Installation
 
-**Подходит для:**
-- OpenAI GPT-4, GPT-3.5
-- Anthropic Claude
-- Mistral, Llama
-- Большинство локальных моделей через Ollama
+1. Clone or copy this folder to `ComfyUI/custom_nodes/`
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Restart ComfyUI
+4. Find nodes in the **LLM** category
 
-### Multimodal Format (force_multimodal=True)
-Используется для мультимодальных моделей:
-```json
-{
-  "role": "user",
-  "content": [
-    {"type": "text", "text": "Your text here"}
-  ]
-}
-```
+## Quick Start
 
-**Обязателен для:**
-- ✅ **LongCat-Flash-Omni-2603** (даже без изображений!)
-- ✅ Vision models с изображениями
-- ✅ Модели, требующие структурированный input
+1. Add the node **ComfyUI Dual VLLM** to your workflow
+2. Set your API endpoint (e.g., `http://127.0.0.1:11434` for Ollama)
+3. Enter a model name (e.g., `qwen2:7b`)
+4. Type your prompt and run
+5. The generated prompt appears at the `generated_prompt` output
 
----
+## Parameters (V5 / V4)
 
-## Примеры использования V3
+### Required
+- **prompt** — your query to the LLM
+- **system_prompt_preset** — select a preset from `presets.json`
+- **system_prompt_custom** — custom system prompt (if preset = "Empty")
+- **vision/url, vision/api_key, vision/model** — vision model connection
+- **text/url, text/api_key, text/model** — text model connection
+- **temperature** — generation temperature (0.0–2.0)
+- **max_tokens** — max tokens in response
 
-### Пример 1: LongCat Omni (требует multimodal)
-
-```
-URL: https://api.longcat.chat/openai
-API Key: ak_2Ka6vY3gR8Ub8NX69Y3jr5Tg2IH3m
-Model: LongCat-Flash-Omni-2603
-Force Multimodal: ✅ TRUE (обязательно!)
-```
-
-### Пример 2: Ollama локально (string format)
-
-```
-URL: http://127.0.0.1:11434
-API Key: (пусто)
-Model: qwen2-vl:7b
-Force Multimodal: ❌ FALSE
-```
-
-### Пример 3: OpenAI API (string format)
-
-```
-URL: https://api.openai.com/v1
-API Key: sk-...
-Model: gpt-4
-Force Multimodal: ❌ FALSE
-```
-
-### Пример 4: Vision model с изображением (auto multimodal)
-
-```
-URL: http://127.0.0.1:11434
-Model: llava:13b
-Image: (подключить изображение)
-Force Multimodal: ❌ FALSE (автоматически включится)
-```
-
----
-
-## Параметры ноды V3
-
-### Обязательные:
-- **prompt** - текст запроса к модели
-- **system_prompt_preset** - выбор пресета из presets.json
-- **system_prompt_custom** - кастомный system prompt (если preset = "Empty")
-- **url** - URL API endpoint
-- **api_key** - API ключ (может быть пустым для локальных моделей)
-- **model** - название модели
-- **temperature** - температура генерации (0.0-2.0)
-- **max_tokens** - максимум токенов в ответе
-
-### Новые в V3:
-- **force_multimodal** - принудительно использовать мультимодальный формат
-  - `FALSE` (default) - автоматический выбор формата
-  - `TRUE` - всегда использовать multimodal (для LongCat Omni)
-
-### Опциональные:
-- **image** - входное изображение (автоматически включает multimodal)
-- **image_resize** - изменять размер изображения
-- **resize_width** - ширина (default: 1024)
-- **resize_height** - высота (default: 1024)
-
----
-
-## Поддерживаемые API
-
-### Локальные:
-- ✅ Ollama (http://localhost:11434)
-- ✅ llama.cpp server
-- ✅ LocalAI
-- ✅ text-generation-webui
-
-### Облачные:
-- ✅ OpenAI API
-- ✅ Anthropic Claude API
-- ✅ **LongCat API** (https://api.longcat.chat/openai) - требует force_multimodal!
-- ✅ OpenRouter
-- ✅ Together AI
-- ✅ Groq
-- ✅ DeepSeek
-- ✅ Любой OpenAI-совместимый API
-
----
+### Optional
+- **image** — input image (automatically enables multimodal mode)
+- **image_resize** — resize image before sending
+- **resize_width/height** — target dimensions (default: 1024)
+- **image_format** — JPEG / PNG / WEBP
+- **image_quality** — compression quality (10–100)
+- **vision_prompt** — custom prompt for the vision model
 
 ## System Prompts
 
-Edit `presets.json` to add your own system prompts:
+Edit `presets.json` to add your own presets:
 
 ```json
 {
@@ -157,86 +88,35 @@ Edit `presets.json` to add your own system prompts:
 }
 ```
 
----
-
-## Troubleshooting
-
-### Ошибка: "json format error"
-**Причина:** Модель требует мультимодальный формат, но получает string.
-
-**Решение:** Включите `force_multimodal = TRUE`
-
-**Пример:** LongCat-Flash-Omni-2603 всегда требует multimodal формат.
-
-### Ошибка: "API Error 400"
-**Причина:** Неправильный формат запроса или недоступная модель.
-
-**Решение:** 
-1. Проверьте название модели
-2. Проверьте URL endpoint
-3. Попробуйте переключить `force_multimodal`
-
-### Ошибка: "Request timeout"
-**Причина:** Модель слишком долго генерирует ответ (>120s).
-
-**Решение:** Уменьшите `max_tokens` или используйте более быструю модель.
-
-### Node doesn't appear
-- Restart ComfyUI
-- Check console for errors
-- Verify `aiohttp` is installed
-
-### Image not working
-- Ensure model supports vision (e.g., qwen2-vl, gpt-4-vision)
-- Check image format (PNG/JPEG)
-- Try resizing image
-
----
-
 ## Changelog
 
-### V3 (2026-05-11) ⭐ NEW
-- ✅ Добавлен параметр `force_multimodal`
-- ✅ Smart format detection (автоматический выбор string/multimodal)
-- ✅ Оптимизирована обработка LongCat API endpoint
-- ✅ Улучшена обработка endpoint URL (поддержка `/openai` пути)
-- ✅ Исправлена избыточная обертка system messages в массив
-- ✅ Оптимизирована функция `format_messages_smart()`
+### V5 — ComfyUI Dual VLLM (Latest)
+- Dual model architecture (Vision → Text pipeline)
+- Single Mode (multimodal) for vision-capable models
+- Clean status outputs for debugging
 
-### V2 (Previous)
-- ✅ Async/await для неблокирующих запросов
-- ✅ Мультимодальный формат для всех запросов
-- ✅ Поддержка streaming responses
-- ⚠️ Проблема: всегда использует multimodal, даже когда не нужно
+### V4 — Universal LLM Prompt V4
+- Same dual architecture as V5
+- Russian locale system format options
 
-### V1 (Original)
-- ✅ Базовая функциональность
-- ✅ Синхронные запросы
-- ✅ Поддержка presets
+### V3 — Smart Format (2026-05-11) ⭐
+- `force_multimodal` parameter added
+- Smart format detection (auto string/multimodal)
+- Optimized LongCat API handling
+- Fixed redundant system message wrapping
 
----
+### V2 — Async (Previous)
+- Async/await for non-blocking requests
+- Always used multimodal format (problematic)
 
-## Migration Guide
-
-### From V2 to V3:
-1. Замените ноду "Universal LLM Prompt V2" на "Universal LLM Prompt V3"
-2. Если используете LongCat Omni: включите `force_multimodal = TRUE`
-3. Для остальных моделей: оставьте `force_multimodal = FALSE`
-4. Готово!
-
-### From V1 to V3:
-1. Замените ноду "Universal LLM Prompt" на "Universal LLM Prompt V3"
-2. Переподключите входы
-3. Настройте `force_multimodal` если нужно
-4. Готово!
-
----
+### V1 — Original
+- Basic sync functionality
+- Preset support
 
 ## License
 
-MIT License - Free to use and modify
+MIT — Free to use and modify
 
 ## Author
 
-Created for ComfyUI community
-Updated: 2026-05-11 (V3 release)
+Created for the ComfyUI community

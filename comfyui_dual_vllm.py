@@ -27,9 +27,6 @@ def load_presets():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     presets_path = os.path.join(script_dir, "presets.json")
 
-    if not os.path.exists(presets_path):
-        presets_path = r"C:\scripts\presets.json"
-
     try:
         with open(presets_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
