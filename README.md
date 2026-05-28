@@ -2,7 +2,7 @@
 
 Connect any OpenAI-compatible LLM (local or cloud) to generate, enhance, and refine prompts — or perform image analysis, Q&A, and any LLM task — directly inside ComfyUI.
 
-![Node Screenshot](Screenshot 2026-05-28 193255.png)
+![Node Screenshot](screenshot.png)
 
 ## Features
 
