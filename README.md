@@ -44,8 +44,8 @@ Built-in presets for popular workflows:
 Open a terminal in your ComfyUI directory and run:
 ```bash
 cd custom_nodes
-git clone https://github.com/YOUR_USERNAME/ComfyUI-UniversalLLM.git
-cd ComfyUI-UniversalLLM
+git clone https://github.com/kapustacool-lgtm/UniversalLLM.git
+cd UniversalLLM
 pip install -r requirements.txt
 ```
 Then **restart ComfyUI**.
