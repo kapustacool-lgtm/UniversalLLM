@@ -40,13 +40,26 @@ Built-in presets for popular workflows:
 
 ## Installation
 
-1. Clone or copy this folder to `ComfyUI/custom_nodes/`
+### Via Git (recommended)
+Open a terminal in your ComfyUI directory and run:
+```bash
+cd custom_nodes
+git clone https://github.com/YOUR_USERNAME/ComfyUI-UniversalLLM.git
+cd ComfyUI-UniversalLLM
+pip install -r requirements.txt
+```
+Then **restart ComfyUI**.
+
+### Manual
+1. Download or copy this folder to `ComfyUI/custom_nodes/UniversalLLM`
 2. Install dependencies:
    ```bash
+   cd ComfyUI/custom_nodes/UniversalLLM
    pip install -r requirements.txt
    ```
 3. Restart ComfyUI
-4. Find nodes in the **LLM** category
+
+After restart, find the nodes in the **LLM** category.
 
 ## Quick Start
 
